@@ -7,7 +7,13 @@
 // Determinism: ids and timestamps come from logical counters, never from the
 // wall clock or randomness, so a replayed trial produces identical answers.
 
-import { ObjectStore } from './gitstore.ts';
+import {
+  ObjectStore,
+  buildCommitData,
+  flattenTree,
+  mergeBase,
+  parseCommit,
+} from './gitstore.ts';
 
 export interface CommentRec {
   id: number;
@@ -15,6 +21,8 @@ export interface CommentRec {
 }
 
 export interface IssueRec {
+  /** Global database id (GitHub issues carry one beside the number). */
+  id: number;
   number: number;
   title: string;
   body: string;
@@ -24,6 +32,8 @@ export interface IssueRec {
 }
 
 export interface PullRec {
+  /** Global database id, from the same sequence as issue ids. */
+  id: number;
   number: number;
   title: string;
   body: string;
@@ -57,8 +67,14 @@ export class Forge {
   viewer: string | null = null;
   private readonly repos = new Map<string, RepoRec>();
   private nextRepoId = 1;
+  private nextNodeId = 1;
   private clock = 0;
   private requestSeq = 0;
+
+  /** The next global database id for an issue or pull request. */
+  allocNodeId(): number {
+    return this.nextNodeId++;
+  }
 
   /** The next logical timestamp, as epoch seconds. */
   tick(): number {
@@ -132,4 +148,51 @@ export class Forge {
   setBranch(repo: RepoRec, branch: string, oid: string): void {
     repo.refs.set(`refs/heads/${branch}`, oid);
   }
+
+  repoById(id: number): RepoRec | null {
+    for (const repo of this.repos.values()) if (repo.id === id) return repo;
+    return null;
+  }
+}
+
+/**
+ * Squash-merge a pull request: one new commit on the base branch whose tree
+ * is the head tip's tree. Returns the merge commit oid, or null when the
+ * merge conflicts — the base has moved since the merge-base and some path
+ * changed on both sides to different results. On success the PR record is
+ * updated (closed, merged, merge_commit_sha).
+ */
+export function performSquashMerge(forge: Forge, repo: RepoRec, pr: PullRec): string | null {
+  const baseTip = forge.branchTip(repo, pr.baseRef);
+  const headTip = forge.branchTip(repo, pr.headRef);
+  if (!baseTip || !headTip) return null;
+  const mb = mergeBase(forge.store, headTip, baseTip);
+  if (mb !== null && mb !== baseTip) {
+    const filesAt = (commitOid: string) =>
+      flattenTree(forge.store, parseCommit(forge.store.get(commitOid)?.data ?? Buffer.alloc(0)).tree);
+    const mbFiles = filesAt(mb);
+    const baseFiles = filesAt(baseTip);
+    const headFiles = filesAt(headTip);
+    const paths = new Set([...mbFiles.keys(), ...baseFiles.keys(), ...headFiles.keys()]);
+    for (const path of paths) {
+      const inMb = mbFiles.get(path)?.oid;
+      const inBase = baseFiles.get(path)?.oid;
+      const inHead = headFiles.get(path)?.oid;
+      if (inBase !== inMb && inHead !== inMb && inBase !== inHead) return null;
+    }
+  }
+  const headTree = parseCommit(forge.store.get(headTip)?.data ?? Buffer.alloc(0)).tree;
+  const data = buildCommitData({
+    tree: headTree,
+    parents: [baseTip],
+    message: `${pr.title} (#${pr.number})`,
+    authorLine: forge.authorLine(),
+  });
+  const commitOid = forge.store.store('commit', data);
+  forge.setBranch(repo, pr.baseRef, commitOid);
+  pr.state = 'closed';
+  pr.merged = true;
+  pr.mergedAt = forge.isoNow();
+  pr.mergeCommitSha = commitOid;
+  return commitOid;
 }

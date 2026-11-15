@@ -20,6 +20,7 @@ import {
   updateTree,
 } from './gitstore.ts';
 import type { Forge, IssueRec, PullRec, RepoRec } from './forge.ts';
+import { performSquashMerge } from './forge.ts';
 
 type SendJson = (res: ServerResponse, status: number, body: unknown, headers?: Readonly<Record<string, string>>) => void;
 
@@ -65,6 +66,7 @@ function repoJson(forge: Forge, repo: RepoRec): Record<string, unknown> {
 
 function issueJson(repo: RepoRec, issue: IssueRec): Record<string, unknown> {
   return {
+    id: issue.id,
     number: issue.number,
     title: issue.title,
     body: issue.body,
@@ -76,6 +78,7 @@ function issueJson(repo: RepoRec, issue: IssueRec): Record<string, unknown> {
 
 function pullJson(forge: Forge, repo: RepoRec, pr: PullRec): Record<string, unknown> {
   return {
+    id: pr.id,
     number: pr.number,
     title: pr.title,
     body: pr.body,
@@ -247,6 +250,7 @@ function issueCreate(ctx: Ctx, repo: RepoRec, body: Buffer): void {
     }
   }
   const issue: IssueRec = {
+    id: ctx.forge.allocNodeId(),
     number: repo.nextNumber++,
     title: typeof input.title === 'string' ? input.title : '',
     body: typeof input.body === 'string' ? input.body : '',
@@ -325,48 +329,11 @@ function pullFiles(ctx: Ctx, repo: RepoRec, pr: PullRec): void {
 }
 
 function pullMerge(ctx: Ctx, repo: RepoRec, pr: PullRec): void {
-  const forge = ctx.forge;
-  const baseTip = forge.branchTip(repo, pr.baseRef);
-  const headTip = forge.branchTip(repo, pr.headRef);
-  if (!baseTip || !headTip) {
-    fail(ctx, 405, 'Pull request is not mergeable');
+  const commitOid = performSquashMerge(ctx.forge, repo, pr);
+  if (commitOid === null) {
+    fail(ctx, 405, 'Pull request has conflicts that must be resolved');
     return;
   }
-  const mb = mergeBase(forge.store, headTip, baseTip);
-  if (mb !== null && mb !== baseTip) {
-    // The base moved since the fork point: conflict iff a path changed on
-    // both sides to different results.
-    const mbTree = parseCommit(forge.store.get(mb)?.data ?? Buffer.alloc(0)).tree;
-    const baseTree = parseCommit(forge.store.get(baseTip)?.data ?? Buffer.alloc(0)).tree;
-    const headTree = parseCommit(forge.store.get(headTip)?.data ?? Buffer.alloc(0)).tree;
-    const at = (tree: string) => flattenTree(forge.store, tree);
-    const mbFiles = at(mbTree);
-    const baseFiles = at(baseTree);
-    const headFiles = at(headTree);
-    const paths = new Set([...mbFiles.keys(), ...baseFiles.keys(), ...headFiles.keys()]);
-    for (const path of paths) {
-      const inMb = mbFiles.get(path)?.oid;
-      const inBase = baseFiles.get(path)?.oid;
-      const inHead = headFiles.get(path)?.oid;
-      if (inBase !== inMb && inHead !== inMb && inBase !== inHead) {
-        fail(ctx, 405, 'Pull request has conflicts that must be resolved');
-        return;
-      }
-    }
-  }
-  const headTree = parseCommit(forge.store.get(headTip)?.data ?? Buffer.alloc(0)).tree;
-  const data = buildCommitData({
-    tree: headTree,
-    parents: [baseTip],
-    message: `${pr.title} (#${pr.number})`,
-    authorLine: forge.authorLine(),
-  });
-  const commitOid = forge.store.store('commit', data);
-  forge.setBranch(repo, pr.baseRef, commitOid);
-  pr.state = 'closed';
-  pr.merged = true;
-  pr.mergedAt = forge.isoNow();
-  pr.mergeCommitSha = commitOid;
   j(ctx, 200, { merged: true, sha: commitOid, message: 'Pull Request successfully merged' });
 }
 
@@ -646,6 +613,7 @@ export function handleRest(
           if (!input) return;
           const stripOwner = (ref: string) => (ref.includes(':') ? ref.split(':').pop() as string : ref);
           const pr: PullRec = {
+            id: forge.allocNodeId(),
             number: repo.nextNumber++,
             title: typeof input.title === 'string' ? input.title : '',
             body: typeof input.body === 'string' ? input.body : '',

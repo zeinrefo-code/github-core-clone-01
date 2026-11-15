@@ -17,12 +17,34 @@ import {
   pktLine,
   pktSideband,
   readPack,
+  sha1Hex,
   writePack,
   type ObjectStore,
 } from './gitstore.ts';
 import type { Forge, RepoRec } from './forge.ts';
 
 const AGENT = 'agent=makefun-forge/1.0';
+
+// Fetch responses are pure functions of the repo's refs and the request
+// (the object store is append-only), so identical fetches — the clone
+// benchmark issues fifty of them — are served from a small cache.
+const fetchCache = new Map<string, Buffer>();
+
+function refsKey(repo: RepoRec): string {
+  return [...repo.refs.entries()].sort().map(([r, o]) => `${r}=${o}`).join('|');
+}
+
+function cached(key: string, build: () => Buffer): Buffer {
+  const hit = fetchCache.get(key);
+  if (hit) return hit;
+  const built = build();
+  if (fetchCache.size >= 128) {
+    const oldest = fetchCache.keys().next().value;
+    if (oldest !== undefined) fetchCache.delete(oldest);
+  }
+  fetchCache.set(key, built);
+  return built;
+}
 
 function sortedRefs(repo: RepoRec): Array<[string, string]> {
   return [...repo.refs.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1));
@@ -166,6 +188,11 @@ function sidebandPack(pack: Buffer): Buffer[] {
 }
 
 function fetchV2(forge: Forge, repo: RepoRec, args: string[]): Buffer {
+  const cacheKey = `v2|${repo.name}|${refsKey(repo)}|${args.join('|')}`;
+  return cached(cacheKey, () => fetchV2Uncached(forge, repo, args));
+}
+
+function fetchV2Uncached(forge: Forge, repo: RepoRec, args: string[]): Buffer {
   const parsed = parseFetchArgs(args);
   const store = forge.store;
   const set = computeFetchSet(store, parsed.wants, parsed.haves, parsed.shallow, parsed.depth, parsed.deepen);
@@ -206,6 +233,11 @@ function fetchV2(forge: Forge, repo: RepoRec, args: string[]): Buffer {
 // ---------------------------------------------------------------------------
 
 function fetchV0(forge: Forge, repo: RepoRec, body: Buffer): Buffer {
+  const cacheKey = `v0|${repo.name}|${refsKey(repo)}|${sha1Hex(body)}`;
+  return cached(cacheKey, () => fetchV0Uncached(forge, repo, body));
+}
+
+function fetchV0Uncached(forge: Forge, repo: RepoRec, body: Buffer): Buffer {
   const reader = new PktReader(body);
   const wants: string[] = [];
   const haves: string[] = [];

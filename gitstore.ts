@@ -324,32 +324,40 @@ export function computeFetchSet(
     for (const parent of parseCommit(obj.data).parents) queue.push([parent, d + 1]);
   }
 
-  // What the client already holds: the full closure of its haves, plus the
-  // shallow boundary commits themselves (their trees included, parents cut).
-  const possessedObjects = objectClosure(store, haves);
-  const possessedCommits = commitClosure(store, haves);
+  // What the client already holds: the full closure of its haves — except a
+  // have that is also a shallow boundary, which the client holds WITHOUT its
+  // ancestry (that is what shallow means). Boundary commits contribute
+  // themselves and their trees only.
+  const shallowCommits = new Set<string>();
   for (const oid of shallowOids) {
     const commit = derefToCommit(store, oid);
-    if (commit) {
-      // The boundary commit and its own tree are held; its parents are not.
-      possessedCommits.add(commit);
-      possessedObjects.add(commit);
-      const parsed = parseCommit((store.get(commit) as GitObject).data);
-      for (const o of objectClosure(store, [parsed.tree])) possessedObjects.add(o);
+    if (commit) shallowCommits.add(commit);
+  }
+  const possessedObjects = new Set<string>();
+  const possessedCommits = new Set<string>();
+  const holdShallow = (commit: string) => {
+    possessedCommits.add(commit);
+    possessedObjects.add(commit);
+    const parsed = parseCommit((store.get(commit) as GitObject).data);
+    for (const o of objectClosure(store, [parsed.tree])) possessedObjects.add(o);
+  };
+  for (const have of haves) {
+    const commit = derefToCommit(store, have);
+    if (commit && shallowCommits.has(commit)) {
+      holdShallow(commit);
+    } else {
+      for (const c of commitClosure(store, [have])) possessedCommits.add(c);
+      for (const o of objectClosure(store, [have])) possessedObjects.add(o);
     }
   }
+  for (const commit of shallowCommits) holdShallow(commit);
 
-  // The depth limit for commits to send.
+  // The depth limit for commits to send. On the wire, deepen carries the
+  // TOTAL depth wanted from the want tips (deepen 2 on a depth-1 clone asks
+  // for exactly one more generation), same as a fresh fetch's depth.
   let limit = Number.POSITIVE_INFINITY;
-  if (depth !== null) limit = depth - 1;
-  if (deepen !== null) {
-    let base = 0;
-    for (const oid of shallowOids) {
-      const commit = derefToCommit(store, oid);
-      if (commit && depthOf.has(commit)) base = Math.max(base, depthOf.get(commit) as number);
-    }
-    limit = base + deepen;
-  }
+  const wantedDepth = depth !== null ? depth : deepen;
+  if (wantedDepth !== null) limit = wantedDepth - 1;
 
   const sentCommits: string[] = [];
   for (const [oid, d] of depthOf) {
@@ -373,10 +381,13 @@ export function computeFetchSet(
     if (parsed.parents.every((p) => sentSet.has(p) || possessedCommits.has(p))) unshallow.push(commit);
   }
 
-  // Trees and blobs of the sent commits that the client does not already hold.
+  // Trees and blobs of the sent commits that the client does not already
+  // hold. Only each commit's own tree closure — following parents here would
+  // leak history into shallow fetches.
   const packObjects = new Set<string>(sentCommits);
   for (const oid of sentCommits) {
-    for (const o of objectClosure(store, [oid])) {
+    const tree = parseCommit((store.get(oid) as GitObject).data).tree;
+    for (const o of objectClosure(store, [tree])) {
       if (!possessedObjects.has(o)) packObjects.add(o);
     }
   }
@@ -492,24 +503,37 @@ export function applyDelta(base: Buffer, delta: Buffer): Buffer {
  * expected size is the stream's true end (binary search).
  */
 function zlibStreamLength(pack: Buffer, pos: number, expectedSize: number): number {
+  const remaining = pack.length - pos;
+  // inflateSync ignores bytes past the stream's end and throws on a
+  // truncated stream, so "inflates to exactly expectedSize" is monotone in
+  // the slice length: false below the true end, true at and above it.
+  const ok = (len: number): boolean => {
+    try {
+      return inflateSync(pack.subarray(pos, pos + len)).length === expectedSize;
+    } catch {
+      return false;
+    }
+  };
+  // Bracket the end: probe upward from a first guess (a deflated object is
+  // rarely larger than its plain size plus slack) until inflation succeeds.
   let lo = 1;
-  let hi = pack.length - pos;
-  let answer = -1;
+  let hi = Math.min(remaining, Math.max(16, expectedSize + 128));
+  while (!ok(hi)) {
+    if (hi >= remaining) throw new Error('corrupt zlib stream in pack');
+    lo = hi + 1;
+    hi = Math.min(remaining, hi * 2);
+  }
+  // Binary search for the minimal working length inside the bracket.
+  let answer = hi;
   while (lo <= hi) {
     const mid = (lo + hi) >> 1;
-    try {
-      const out = inflateSync(pack.subarray(pos, pos + mid));
-      if (out.length === expectedSize) {
-        answer = mid;
-        hi = mid - 1;
-      } else {
-        lo = mid + 1;
-      }
-    } catch {
+    if (ok(mid)) {
+      answer = mid;
+      hi = mid - 1;
+    } else {
       lo = mid + 1;
     }
   }
-  if (answer < 0) throw new Error('corrupt zlib stream in pack');
   return answer;
 }
 
