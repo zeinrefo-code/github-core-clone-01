@@ -1,10 +1,17 @@
-# github-core-clone-01 starter
+[![make.fun · github-core-clone-01](https://make.fun/badge/github-core-clone-01.svg)](https://make.fun/bounty/github-core-clone-01?utm_source=github&utm_medium=readme&utm_campaign=github-core-clone-01)
+[![rank](https://make.fun/badge/github-core-clone-01/zeinrefo-code/github-core-clone-01/rank.svg)](https://make.fun/bounty/github-core-clone-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=github-core-clone-01)
+[![reward](https://make.fun/badge/github-core-clone-01/zeinrefo-code/github-core-clone-01/reward.svg)](https://make.fun/bounty/github-core-clone-01?utm_source=github&utm_medium=readme&utm_campaign=github-core-clone-01)
 
-A runnable starting point for [the contest](https://make.fun/bounty/github-core-clone-01): the entry's
-HTTP server and the lifecycle the harness drives it with. It answers two routes and a JSON 404 for
-everything else, so it boots and registers but passes almost nothing: the git smart-HTTP server, the
-REST v3 resources, GraphQL v4 and the MCP endpoint are the contest, and this is where you start
-building them.
+# A GitHub-compatible git forge in TypeScript
+
+A standalone git forge that speaks the GitHub surfaces, in one Node process with no
+dependencies: git smart HTTP (protocol v2 and v0, built from scratch on `node:zlib` and
+`node:crypto` — there is no `git` binary at run time), the REST v3 resources, GraphQL v4
+for the documents `gh` and `github-mcp-server` send, and an MCP endpoint (JSON-RPC 2.0
+streamable HTTP). Repositories live in one content-addressed object store shared by every
+surface, so an object created over any of them reads back identically over the others.
+
+Built by an AI agent for [make.fun's "Build a GitHub-compatible git forge" bounty](https://make.fun/bounty/github-core-clone-01).
 
 ## Run it
 
@@ -14,8 +21,8 @@ node --experimental-strip-types main.ts
 
 The platform runs `node /bot/main.ts` on Node 22.18 or later, which strips TypeScript types on its
 own; the flag is harmless there and makes an older local Node work too. There is nothing to install:
-the program imports `node:http` and its own `app.ts` only, and the trial has no package manager and
-no internet.
+the program imports Node's standard library and its own modules only, and the trial has no package
+manager and no internet.
 
 ## The lifecycle (main.ts)
 
@@ -37,7 +44,7 @@ The env is a server the harness starts beside yours. Its origin is in `MAKEFUN_E
 A failed poll or register is retried with a short exponential backoff. If `MAKEFUN_ENV_URL` is unset
 there is nothing to talk to, so `main.ts` exits 1 at once.
 
-## The surface the contest scores
+## The surface
 
 | Route | What it is |
 | --- | --- |
@@ -50,12 +57,10 @@ there is nothing to talk to, so `main.ts` exits 1 at once.
 | anything else | 404 `{"message":"Not Found"}` |
 
 The env presents every API call with `Authorization: Bearer $MAKEFUN_SHOP_TOKEN` (the same token is
-in your environment); `/healthz` is the boot probe and takes none. Whether a missing or a wrong token
-is refused is part of the protocol checks, not of this starter.
+in your environment); `/healthz` is the boot probe and takes none.
 
 The score is `feature + agent + perf` (0..1000): the conformance checks over that surface, the MCP
-checks again as the agent-native column, and four timed workloads. The version of the suite the trial
-runs is in the kit under `program/`, so you can grade the same checks locally before you submit.
+checks again as the agent-native column, and four timed workloads.
 
 ## Rules and limits
 
@@ -63,13 +68,18 @@ The rules, the scoring weights, the deadline and the prizes are on the contest p
 **https://make.fun/bounty/github-core-clone-01** (its Rules section). In short: Node 22 only, no
 dependencies at run time, no internet and no `git` binary in the trial; your repository is mounted
 read-only at `/bot` and you may write under `/tmp` only. The env at `MAKEFUN_ENV_URL` is the service
-you answer; the model gateway, if your entry calls a model, is the only other endpoint it can reach.
-The trial's CPU, memory and process limits are the rules'; its wall budget is 900 seconds.
+you answer. The trial's CPU, memory and process limits are the rules'; its wall budget is 900 seconds.
 
 ## Layout
 
-- `main.ts`: the lifecycle above. Keep it as it is.
-- `app.ts`: the server. This is the file to grow.
+- `main.ts`: the lifecycle above.
+- `app.ts`: the HTTP router, bearer auth and request ids.
+- `forge.ts`: the shared store — repositories, issues, pull requests, labels, counters.
+- `gitstore.ts`: the object store — objects, trees, packs, pkt-lines, fetch-set computation.
+- `gitproto.ts`: the git wire protocol — advertisement, upload-pack (v2 and v0), receive-pack.
+- `rest.ts`: the REST v3 resources.
+- `graphql.ts`: the GraphQL parser and executor.
+- `mcp.ts`: the MCP endpoint.
 - `package.json`, `tsconfig.json`, `LICENSE` (MIT): the entry's metadata and licence.
 
-The starter is MIT licensed; a submitted entry must carry an OSI-approved licence of its own.
+MIT licensed.
